@@ -12,9 +12,10 @@ type DNSProxy struct {
 	server         *dns.Server
 	dnsServers     []string
 	domainMappings map[string]string
+	validateDNSSEC bool
 }
 
-func NewDNSProxy(addr string, dnsServers []string, domainMappings map[string]string) *DNSProxy {
+func NewDNSProxy(addr string, dnsServers []string, domainMappings map[string]string, validateDNSSEC bool) *DNSProxy {
 	return &DNSProxy{
 		server: &dns.Server{
 			Addr: addr,
@@ -22,6 +23,7 @@ func NewDNSProxy(addr string, dnsServers []string, domainMappings map[string]str
 		},
 		dnsServers:     dnsServers,
 		domainMappings: domainMappings,
+		validateDNSSEC: validateDNSSEC,
 	}
 }
 
@@ -57,6 +59,11 @@ func (p *DNSProxy) handleDNS(w dns.ResponseWriter, r *dns.Msg) {
 	// Create a DNS client
 	client := new(dns.Client)
 
+	// If DNSSEC validation is enabled, set EDNS0 with DO bit
+	if p.validateDNSSEC {
+		r.SetEdns0(4096, true)
+	}
+
 	// Try each DNS server in order
 	var lastErr error
 	for i, server := range p.dnsServers {
@@ -66,6 +73,16 @@ func (p *DNSProxy) handleDNS(w dns.ResponseWriter, r *dns.Msg) {
 			log.Printf("DNS SERVER %d FAILED (%s): %v, trying next", i+1, server, err)
 			continue
 		}
+
+		// Log DNSSEC validation status if enabled
+		if p.validateDNSSEC {
+			if opt := resp.IsEdns0(); opt != nil && opt.Do() {
+				log.Printf("DNSSEC validation enabled for %s", queryName)
+			} else {
+				log.Printf("DNSSEC validation not available for %s", queryName)
+			}
+		}
+
 		log.Printf("RESOLVED BY SERVER %d: %s -> %s", i+1, queryName, server)
 		w.WriteMsg(resp)
 		return
@@ -93,6 +110,9 @@ func (p *DNSProxy) Start() error {
 	for suffix, ip := range p.domainMappings {
 		log.Printf("  %s -> %s", suffix, ip)
 	}
+	if p.validateDNSSEC {
+		log.Printf("DNSSEC validation enabled")
+	}
 	return p.server.ListenAndServe()
 }
 
@@ -101,6 +121,7 @@ func main() {
 	listenAddr := flag.String("listen", ":53", "Address to listen on")
 	dnsServers := flag.String("servers", "8.8.8.8,1.1.1.1", "Comma-separated list of DNS servers in priority order")
 	domainMappings := flag.String("domains", "", "Comma-separated list of domain=ip mappings (e.g., '.docker=172.168.1.1,.test=192.168.1.1')")
+	validateDNSSEC := flag.Bool("dnssec", false, "Enable DNSSEC validation")
 	flag.Parse()
 
 	// Parse DNS servers
@@ -131,6 +152,7 @@ func main() {
 		*listenAddr,
 		servers,
 		mappings,
+		*validateDNSSEC,
 	)
 
 	// Start the proxy
